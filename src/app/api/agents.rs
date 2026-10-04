@@ -3,9 +3,9 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::api::schema::{
-    is_canonical_nudge_id, AgentNudgeOutcome, AgentNudgeParams, AgentNudgeTargetIdentity,
-    AgentNudgeTargetInstance, AgentPromptParams, AgentRenameParams, AgentSendKeysParams,
-    AgentStartParams, AgentStatus, AgentTarget, PaneReadResult, ResponseResult,
+    is_canonical_nudge_id, AgentNudgeOutcome, AgentNudgeParams, AgentNudgeTargetInstance,
+    AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentStatus,
+    AgentTarget, PaneReadResult, ResponseResult,
 };
 use crate::app::{terminal_targets::TerminalTargetError, App};
 
@@ -488,7 +488,7 @@ fn agent_not_found(id: String, target: &str) -> String {
 mod tests {
     use super::*;
     use crate::{
-        api::schema::{AgentStatus, ErrorResponse, SuccessResponse},
+        api::schema::{AgentNudgeTargetIdentity, AgentStatus, ErrorResponse, SuccessResponse},
         app::Mode,
         config::Config,
         detect::{Agent, AgentState},

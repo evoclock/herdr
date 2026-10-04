@@ -1126,6 +1126,13 @@ fn print_agent_help() {
     eprintln!("  kinds: {}", super::spec::agent_kind_values().join("|"));
 }
 
+fn parse_timeout(value: &str) -> Result<u64, i32> {
+    super::parse_u64_flag("--timeout", value).map_err(|err| {
+        eprintln!("{err}");
+        2
+    })
+}
+
 #[cfg(test)]
 mod nudge_cli_tests {
     use super::agent_nudge_exit_code;
@@ -1142,11 +1149,4 @@ mod nudge_cli_tests {
         }
         assert_eq!(agent_nudge_exit_code(&serde_json::json!({"error": {}})), 1);
     }
-}
-
-fn parse_timeout(value: &str) -> Result<u64, i32> {
-    super::parse_u64_flag("--timeout", value).map_err(|err| {
-        eprintln!("{err}");
-        2
-    })
 }
