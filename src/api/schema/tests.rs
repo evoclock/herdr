@@ -153,6 +153,63 @@ fn agent_start_and_prompt_requests_round_trip() {
 }
 
 #[test]
+fn agent_nudge_request_and_refusal_response_round_trip() {
+    let request = Request {
+        id: "nudge".into(),
+        method: Method::AgentNudge(AgentNudgeParams {
+            target: "reviewer".into(),
+            expected_instance: AgentNudgeTargetIdentity {
+                terminal_id: "term-1".into(),
+                workspace_id: "ws-1".into(),
+                tab_id: "tab-1".into(),
+                pane_id: "pane-1".into(),
+                revision: 9,
+                state_change_seq: 4,
+            },
+            nudge_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            text: "Please report a checkpoint.".into(),
+            timeout_ms: 5_000,
+        }),
+    };
+    let value = serde_json::to_value(&request).unwrap();
+    assert_eq!(value["method"], "agent.nudge");
+    assert_eq!(serde_json::from_value::<Request>(value).unwrap(), request);
+
+    let response = SuccessResponse {
+        id: "nudge".into(),
+        result: ResponseResult::AgentNudged {
+            nudge_id: "550e8400-e29b-41d4-a716-446655440000".into(),
+            target_instance: None,
+            outcome: AgentNudgeOutcome::RejectedBeforeDelivery,
+            code: "nudge_transport_unavailable".into(),
+        },
+    };
+    let value = serde_json::to_value(&response).unwrap();
+    assert_eq!(value["result"]["type"], "agent_nudged");
+    assert_eq!(value["result"]["outcome"], "rejected_before_delivery");
+    assert_eq!(
+        serde_json::from_value::<SuccessResponse>(value).unwrap(),
+        response
+    );
+}
+
+#[test]
+fn nudge_id_requires_canonical_lowercase_uuid_v4() {
+    assert!(is_canonical_nudge_id(
+        "550e8400-e29b-41d4-a716-446655440000"
+    ));
+    assert!(!is_canonical_nudge_id(
+        "550e8400-e29b-11d4-a716-446655440000"
+    ));
+    assert!(!is_canonical_nudge_id(
+        "550E8400-E29B-41D4-A716-446655440000"
+    ));
+    assert!(!is_canonical_nudge_id(
+        "550e8400-e29b-41d4-c716-446655440000"
+    ));
+}
+
+#[test]
 fn bundled_protocol_schema_refs_resolve_inside_bundle() {
     fn assert_no_standalone_refs(value: &serde_json::Value) {
         match value {

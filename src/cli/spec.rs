@@ -363,6 +363,22 @@ fn agent_command() -> Command {
                 ),
         )
         .subcommand(
+            Command::new("nudge")
+                .about("Request one bounded, non-blocking recovery message")
+                .override_usage("herdr agent nudge <TARGET> <TEXT> --nudge-id UUID --terminal-id ID --workspace-id ID --tab-id ID --pane-id ID --revision N --state-change-seq N [--timeout MS]")
+                .arg(required("target", "TARGET"))
+                .arg(required("text", "TEXT"))
+                .arg(option("nudge-id", "UUID").required(true))
+                .arg(option("terminal-id", "ID").required(true))
+                .arg(option("workspace-id", "ID").required(true))
+                .arg(option("tab-id", "ID").required(true))
+                .arg(option("pane-id", "ID").required(true))
+                .arg(option("revision", "N").required(true))
+                .arg(option("state-change-seq", "N").required(true))
+                .arg(option("timeout", "MS").default_value("5000"))
+                .after_help("nudge_id is a caller-minted canonical UUIDv4, unique across caller journeys per logical request. Supply the exact target identity and snapshot sequence/revision from agent.get. Text is limited to 2048 UTF-8 bytes. Timeout is a bounded transport timeout, not a wait for the agent turn. Outcomes: exit 0 delivered, 2 usage/validation, 3 rejected before delivery, 4 unknown, 1 transport/protocol failure. Stable refusal reasons include target_absent, target_ambiguous, target_not_agent, target_instance_changed, target_launch_pending, unsupported_agent_kind, target_idle, target_done, target_status_unknown, and nudge_transport_unavailable. This v0.9.1 fork spike has no delivery transport and refuses before sending anything.")
+        )
+        .subcommand(
             Command::new("rename")
                 .about("Rename an agent")
                 .override_usage("herdr agent rename <TARGET> <NAME>|--clear")

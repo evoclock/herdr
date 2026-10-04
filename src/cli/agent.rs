@@ -1,9 +1,10 @@
 use std::time::{Duration, Instant};
 
 use crate::api::schema::{
-    AgentPromptParams, AgentPromptWaitOptions, AgentReadParams, AgentRenameParams,
-    AgentSendKeysParams, AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody,
-    ErrorResponse, Method, PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
+    is_canonical_nudge_id, AgentNudgeParams, AgentNudgeTargetIdentity, AgentPromptParams,
+    AgentPromptWaitOptions, AgentReadParams, AgentRenameParams, AgentSendKeysParams,
+    AgentStartParams, AgentTarget, AgentWaitParams, EmptyParams, ErrorBody, ErrorResponse, Method,
+    PaneProcessInfoParams, PaneTarget, ReadFormat, ReadSource, Request,
 };
 
 const AGENT_START_POLL_INTERVAL: Duration = Duration::from_millis(100);
@@ -21,6 +22,7 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "read" => agent_read(&args[1..]),
         "send-keys" => agent_send_keys(&args[1..]),
         "prompt" => agent_prompt(&args[1..]),
+        "nudge" => agent_nudge(&args[1..]),
         "rename" => agent_rename(&args[1..]),
         "focus" => agent_focus(&args[1..]),
         "wait" => agent_wait(&args[1..]),
@@ -850,6 +852,178 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     super::print_response(&response)
 }
 
+fn agent_nudge(args: &[String]) -> std::io::Result<i32> {
+    let Some(target) = args.first() else {
+        eprintln!("usage: herdr agent nudge <target> <text> --nudge-id UUID --terminal-id ID --workspace-id ID --tab-id ID --pane-id ID --revision N --state-change-seq N [--timeout MS]");
+        return Ok(2);
+    };
+    let Some(text) = args.get(1) else {
+        eprintln!("agent nudge requires text");
+        return Ok(2);
+    };
+    let mut nudge_id = None;
+    let mut terminal_id = None;
+    let mut workspace_id = None;
+    let mut tab_id = None;
+    let mut pane_id = None;
+    let mut revision = None;
+    let mut state_change_seq = None;
+    let mut timeout_ms = 5_000_u32;
+    let mut index = 2;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--nudge-id" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("--nudge-id requires a canonical UUIDv4");
+                    return Ok(2);
+                };
+                nudge_id = Some(value.clone());
+                index += 2;
+            }
+            "--terminal-id" | "--workspace-id" | "--tab-id" | "--pane-id" | "--revision"
+            | "--state-change-seq" => {
+                let option = args[index].as_str();
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("{option} requires a value");
+                    return Ok(2);
+                };
+                match option {
+                    "--terminal-id" => terminal_id = Some(value.clone()),
+                    "--workspace-id" => workspace_id = Some(value.clone()),
+                    "--tab-id" => tab_id = Some(value.clone()),
+                    "--pane-id" => pane_id = Some(value.clone()),
+                    "--revision" => revision = value.parse::<u64>().ok(),
+                    "--state-change-seq" => state_change_seq = value.parse::<u64>().ok(),
+                    _ => unreachable!(),
+                }
+                if matches!(option, "--revision" | "--state-change-seq")
+                    && (value.is_empty() || value.parse::<u64>().is_err())
+                {
+                    eprintln!("{option} must be an unsigned integer");
+                    return Ok(2);
+                }
+                index += 2;
+            }
+            "--timeout" => {
+                let Some(value) = args.get(index + 1) else {
+                    eprintln!("missing value for --timeout");
+                    return Ok(2);
+                };
+                timeout_ms = match parse_timeout(value) {
+                    Ok(timeout) if (1..=30_000).contains(&timeout) => timeout as u32,
+                    Ok(_) => {
+                        eprintln!("nudge timeout must be between 1 and 30000ms");
+                        return Ok(2);
+                    }
+                    Err(code) => return Ok(code),
+                };
+                index += 2;
+            }
+            option => {
+                eprintln!("unknown option: {option}");
+                return Ok(2);
+            }
+        }
+    }
+    let Some(nudge_id) = nudge_id else {
+        eprintln!("--nudge-id is required; use a fresh canonical UUIDv4 for each logical request");
+        return Ok(2);
+    };
+    if !is_canonical_nudge_id(&nudge_id) {
+        eprintln!("--nudge-id must be a canonical lowercase UUIDv4");
+        return Ok(2);
+    }
+    if text.trim().is_empty() {
+        eprintln!("nudge text must not be empty");
+        return Ok(2);
+    }
+    if text.len() > 2048 {
+        eprintln!("nudge text must not exceed 2048 UTF-8 bytes");
+        return Ok(2);
+    }
+
+    let Some((terminal_id, workspace_id, tab_id, pane_id, revision, state_change_seq)) =
+        terminal_id
+            .zip(workspace_id)
+            .zip(tab_id)
+            .zip(pane_id)
+            .zip(revision)
+            .zip(state_change_seq)
+            .map(
+                |(
+                    ((((terminal_id, workspace_id), tab_id), pane_id), revision),
+                    state_change_seq,
+                )| {
+                    (
+                        terminal_id,
+                        workspace_id,
+                        tab_id,
+                        pane_id,
+                        revision,
+                        state_change_seq,
+                    )
+                },
+            )
+    else {
+        eprintln!("exact target identity is required: --terminal-id --workspace-id --tab-id --pane-id --revision --state-change-seq");
+        return Ok(2);
+    };
+
+    let response = super::send_request(&Request {
+        id: "cli:agent:nudge".into(),
+        method: Method::AgentNudge(AgentNudgeParams {
+            target: target.clone(),
+            expected_instance: AgentNudgeTargetIdentity {
+                terminal_id,
+                workspace_id,
+                tab_id,
+                pane_id,
+                revision,
+                state_change_seq,
+            },
+            nudge_id,
+            text: text.clone(),
+            timeout_ms,
+        }),
+    })?;
+    if response.get("error").is_some() {
+        let code = response
+            .pointer("/error/code")
+            .and_then(serde_json::Value::as_str);
+        eprintln!("{}", serde_json::to_string(&response).unwrap());
+        return Ok(
+            if matches!(
+                code,
+                Some(
+                    "invalid_nudge_id"
+                        | "empty_nudge"
+                        | "nudge_text_too_large"
+                        | "invalid_nudge_timeout"
+                )
+            ) {
+                2
+            } else {
+                1
+            },
+        );
+    }
+    let exit_code = agent_nudge_exit_code(&response);
+    println!("{}", serde_json::to_string(&response).unwrap());
+    Ok(exit_code)
+}
+
+fn agent_nudge_exit_code(response: &serde_json::Value) -> i32 {
+    match response
+        .pointer("/result/outcome")
+        .and_then(serde_json::Value::as_str)
+    {
+        Some("delivered") => 0,
+        Some("rejected_before_delivery") => 3,
+        Some("unknown") => 4,
+        _ => 1,
+    }
+}
+
 fn agent_send_keys(args: &[String]) -> std::io::Result<i32> {
     if args.len() < 2 {
         eprintln!("usage: herdr agent send-keys <target> <key> [key ...]");
@@ -936,6 +1110,7 @@ fn print_agent_help() {
     eprintln!("  herdr agent read <target> [--source visible|recent|recent-unwrapped|detection] [--lines N] [--format text|ansi] [--ansi]");
     eprintln!("  herdr agent send-keys <target> <key> [key ...]");
     eprintln!("  herdr agent prompt <target> <text> [--wait] [--until STATUS]... [--timeout MS]");
+    eprintln!("  herdr agent nudge <target> <text> --nudge-id UUID [--timeout MS]");
     eprintln!("  herdr agent rename <target> <name>|--clear");
     eprintln!("  herdr agent focus <target>");
     eprintln!("  herdr agent wait <target> [--until STATUS]... [--timeout MS]");
@@ -956,4 +1131,22 @@ fn parse_timeout(value: &str) -> Result<u64, i32> {
         eprintln!("{err}");
         2
     })
+}
+
+#[cfg(test)]
+mod nudge_cli_tests {
+    use super::agent_nudge_exit_code;
+
+    #[test]
+    fn nudge_exit_codes_distinguish_three_outcomes_and_invalid_response() {
+        for (outcome, expected) in [
+            ("delivered", 0),
+            ("rejected_before_delivery", 3),
+            ("unknown", 4),
+        ] {
+            let response = serde_json::json!({"result": {"outcome": outcome}});
+            assert_eq!(agent_nudge_exit_code(&response), expected);
+        }
+        assert_eq!(agent_nudge_exit_code(&serde_json::json!({"error": {}})), 1);
+    }
 }

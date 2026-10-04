@@ -3,14 +3,17 @@ use std::time::Duration;
 use bytes::Bytes;
 
 use crate::api::schema::{
-    AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentTarget,
-    PaneReadResult, ResponseResult,
+    is_canonical_nudge_id, AgentNudgeOutcome, AgentNudgeParams, AgentNudgeTargetInstance,
+    AgentPromptParams, AgentRenameParams, AgentSendKeysParams, AgentStartParams, AgentStatus,
+    AgentTarget, PaneReadResult, ResponseResult,
 };
-use crate::app::App;
+use crate::app::{terminal_targets::TerminalTargetError, App};
 
 use super::responses::{encode_error, encode_error_body, encode_success};
 
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
+const MAX_AGENT_NUDGE_BYTES: usize = 2048;
+const MAX_AGENT_NUDGE_TIMEOUT_MS: u32 = 30_000;
 
 // Codex's Windows input reader does not surface bracketed paste. It detects the prompt as a
 // "paste burst" and, while that burst is buffered, rewrites a following Enter into a newline
@@ -50,6 +53,98 @@ impl App {
         };
 
         encode_success(id, ResponseResult::AgentInfo { agent })
+    }
+
+    /// M1 deliberately has no delivery transport: valid calls can only refuse before delivery.
+    pub(super) fn handle_agent_nudge(&self, id: String, params: AgentNudgeParams) -> String {
+        if !is_canonical_nudge_id(&params.nudge_id) {
+            return encode_error(
+                id,
+                "invalid_nudge_id",
+                "nudge_id must be a canonical UUIDv4",
+            );
+        }
+        if params.text.trim().is_empty() {
+            return encode_error(id, "empty_nudge", "nudge text must not be empty");
+        }
+        if params.text.len() > MAX_AGENT_NUDGE_BYTES {
+            return encode_error(
+                id,
+                "nudge_text_too_large",
+                format!("nudge text must not exceed {MAX_AGENT_NUDGE_BYTES} UTF-8 bytes"),
+            );
+        }
+        if !(1..=MAX_AGENT_NUDGE_TIMEOUT_MS).contains(&params.timeout_ms) {
+            return encode_error(
+                id,
+                "invalid_nudge_timeout",
+                format!("nudge timeout must be between 1 and {MAX_AGENT_NUDGE_TIMEOUT_MS}ms"),
+            );
+        }
+
+        let (target_instance, code) = match self.resolve_terminal_target(&params.target) {
+            Err(TerminalTargetError::NotFound { .. }) => (None, "target_absent"),
+            Err(TerminalTargetError::Ambiguous { .. }) => (None, "target_ambiguous"),
+            Ok(resolved) => {
+                let Some(agent) = self.agent_info(resolved.ws_idx, resolved.pane_id) else {
+                    return encode_success(
+                        id,
+                        ResponseResult::AgentNudged {
+                            nudge_id: params.nudge_id,
+                            target_instance: None,
+                            outcome: AgentNudgeOutcome::RejectedBeforeDelivery,
+                            code: "target_not_agent".into(),
+                        },
+                    );
+                };
+                let instance = AgentNudgeTargetInstance {
+                    terminal_id: agent.terminal_id,
+                    workspace_id: agent.workspace_id,
+                    tab_id: agent.tab_id,
+                    pane_id: agent.pane_id,
+                    agent: agent.agent,
+                    status: agent.agent_status,
+                    state_change_seq: agent.state_change_seq,
+                    revision: agent.revision,
+                    launch_pending: agent.launch_pending,
+                    interactive_ready: agent.interactive_ready,
+                };
+                let expected = &params.expected_instance;
+                let code = if instance.terminal_id != expected.terminal_id
+                    || instance.workspace_id != expected.workspace_id
+                    || instance.tab_id != expected.tab_id
+                    || instance.pane_id != expected.pane_id
+                    || instance.revision != expected.revision
+                    || instance.state_change_seq != expected.state_change_seq
+                {
+                    "target_instance_changed"
+                } else if instance.launch_pending {
+                    "target_launch_pending"
+                } else if instance.agent.is_none() {
+                    "unsupported_agent_kind"
+                } else {
+                    match instance.status {
+                        AgentStatus::Idle => "target_idle",
+                        AgentStatus::Done => "target_done",
+                        AgentStatus::Unknown => "target_status_unknown",
+                        AgentStatus::Working | AgentStatus::Blocked => {
+                            "nudge_transport_unavailable"
+                        }
+                    }
+                };
+                (Some(instance), code)
+            }
+        };
+
+        encode_success(
+            id,
+            ResponseResult::AgentNudged {
+                nudge_id: params.nudge_id,
+                target_instance,
+                outcome: AgentNudgeOutcome::RejectedBeforeDelivery,
+                code: code.into(),
+            },
+        )
     }
 
     pub(super) fn handle_agent_focus(&mut self, id: String, target: AgentTarget) -> String {
@@ -393,7 +488,7 @@ fn agent_not_found(id: String, target: &str) -> String {
 mod tests {
     use super::*;
     use crate::{
-        api::schema::{AgentStatus, SuccessResponse},
+        api::schema::{AgentNudgeTargetIdentity, AgentStatus, ErrorResponse, SuccessResponse},
         app::Mode,
         config::Config,
         detect::{Agent, AgentState},
@@ -437,6 +532,208 @@ mod tests {
         start_deferred_agent_prompt(app, id, params)
             .recv_timeout(Duration::from_secs(1))
             .expect("agent prompt responds after submission")
+    }
+
+    fn nudge_params(app: &App, target: &str) -> AgentNudgeParams {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+        let nudge_id = format!(
+            "550e8400-e29b-41d4-a716-{:012x}",
+            NEXT_ID.fetch_add(1, Ordering::Relaxed)
+        );
+        let resolved = app.resolve_terminal_target(target).unwrap();
+        let info = app.agent_info(resolved.ws_idx, resolved.pane_id).unwrap();
+        AgentNudgeParams {
+            target: target.into(),
+            expected_instance: AgentNudgeTargetIdentity {
+                terminal_id: info.terminal_id,
+                workspace_id: info.workspace_id,
+                tab_id: info.tab_id,
+                pane_id: info.pane_id,
+                revision: info.revision,
+                state_change_seq: info.state_change_seq,
+            },
+            nudge_id,
+            text: "Please report a checkpoint.".into(),
+            timeout_ms: 5_000,
+        }
+    }
+
+    #[tokio::test]
+    async fn m1_refuses_working_and_blocked_agents_without_pty_input() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Working);
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        for state in [AgentState::Working, AgentState::Blocked] {
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(Some(Agent::Pi), state);
+            let params = nudge_params(&app, "reviewer");
+            let response = app.handle_agent_nudge("nudge".into(), params);
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::AgentNudged {
+                target_instance,
+                outcome: AgentNudgeOutcome::RejectedBeforeDelivery,
+                code,
+                ..
+            } = success.result
+            else {
+                panic!("expected refusal-only nudge result: {response}");
+            };
+            assert_eq!(code, "nudge_transport_unavailable");
+            assert_eq!(
+                target_instance.unwrap().status,
+                match state {
+                    AgentState::Working => AgentStatus::Working,
+                    AgentState::Blocked => AgentStatus::Blocked,
+                    _ => unreachable!(),
+                }
+            );
+            assert!(rx.try_recv().is_err(), "M1 must never write PTY input");
+        }
+
+        let mut stale = nudge_params(&app, "reviewer");
+        stale.expected_instance.state_change_seq += 1;
+        let response = app.handle_agent_nudge("nudge".into(), stale);
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::AgentNudged {
+            outcome: AgentNudgeOutcome::RejectedBeforeDelivery,
+            code,
+            ..
+        } if code == "target_instance_changed"));
+        assert!(
+            rx.try_recv().is_err(),
+            "stale identity must not write PTY input"
+        );
+    }
+
+    #[tokio::test]
+    async fn m1_refuses_idle_done_unknown_absent_and_launch_pending_targets() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        for (state, expected_code, expected_status) in [
+            (AgentState::Idle, "target_idle", AgentStatus::Idle),
+            (AgentState::Idle, "target_done", AgentStatus::Done),
+            (
+                AgentState::Unknown,
+                "target_status_unknown",
+                AgentStatus::Unknown,
+            ),
+        ] {
+            app.state
+                .terminals
+                .get_mut(&terminal_id)
+                .unwrap()
+                .set_detected_state(Some(Agent::Pi), state);
+            app.state.workspaces[0].tabs[0]
+                .panes
+                .get_mut(&pane_id)
+                .unwrap()
+                .seen = expected_status != AgentStatus::Done;
+            let params = nudge_params(&app, "reviewer");
+            let response = app.handle_agent_nudge("nudge".into(), params);
+            let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+            let ResponseResult::AgentNudged {
+                target_instance,
+                outcome: AgentNudgeOutcome::RejectedBeforeDelivery,
+                code,
+                ..
+            } = success.result
+            else {
+                panic!("expected refusal-only nudge result: {response}");
+            };
+            assert_eq!(code, expected_code);
+            assert_eq!(target_instance.unwrap().status, expected_status);
+            assert!(rx.try_recv().is_err(), "refusal must not write PTY input");
+        }
+
+        let mut absent_params = nudge_params(&app, "reviewer");
+        absent_params.target = "missing-agent".into();
+        let absent = app.handle_agent_nudge("nudge".into(), absent_params);
+        let absent: SuccessResponse = serde_json::from_str(&absent).unwrap();
+        assert!(matches!(absent.result, ResponseResult::AgentNudged {
+            target_instance: None,
+            outcome: AgentNudgeOutcome::RejectedBeforeDelivery,
+            code,
+            ..
+        } if code == "target_absent"));
+        assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn m1_rejects_launch_pending_and_invalid_requests_before_transport() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        app.state
+            .terminals
+            .get_mut(&terminal_id)
+            .unwrap()
+            .begin_managed_agent(
+                "reviewer".into(),
+                Agent::Pi,
+                std::time::Instant::now(),
+                Duration::from_secs(3),
+                Duration::from_secs(30),
+            );
+        let (runtime, mut rx) = crate::terminal::TerminalRuntime::test_with_channel(80, 24);
+        app.state.insert_test_runtime(pane_id, runtime);
+
+        let params = nudge_params(&app, "reviewer");
+        let response = app.handle_agent_nudge("nudge".into(), params);
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::AgentNudged {
+            target_instance: Some(AgentNudgeTargetInstance { launch_pending: true, .. }),
+            outcome: AgentNudgeOutcome::RejectedBeforeDelivery,
+            code,
+            ..
+        } if code == "target_launch_pending"));
+        assert!(rx.try_recv().is_err());
+
+        let mut invalid = nudge_params(&app, "reviewer");
+        invalid.nudge_id = "not-a-uuid".into();
+        let response = app.handle_agent_nudge("nudge".into(), invalid);
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "invalid_nudge_id");
+        assert!(rx.try_recv().is_err());
+
+        let mut boundary = nudge_params(&app, "reviewer");
+        boundary.text = "é".repeat(1024);
+        let response = app.handle_agent_nudge("nudge".into(), boundary);
+        let success: SuccessResponse = serde_json::from_str(&response).unwrap();
+        assert!(matches!(success.result, ResponseResult::AgentNudged {
+            outcome: AgentNudgeOutcome::RejectedBeforeDelivery,
+            code,
+            ..
+        } if code == "target_launch_pending"));
+        assert!(rx.try_recv().is_err());
+
+        let mut too_large = nudge_params(&app, "reviewer");
+        too_large.text = "é".repeat(1025);
+        let response = app.handle_agent_nudge("nudge".into(), too_large);
+        let error: ErrorResponse = serde_json::from_str(&response).unwrap();
+        assert_eq!(error.error.code, "nudge_text_too_large");
+        assert!(rx.try_recv().is_err());
     }
 
     #[cfg(windows)]
