@@ -1228,6 +1228,72 @@
     },
     "request": {
       "$defs": {
+        "AgentNudgeParams": {
+          "description": "One bounded recovery message request. The caller creates a canonical UUIDv4\nunique across its journeys for this logical request and must not reuse it.",
+          "properties": {
+            "expected_instance": {
+              "$ref": "#/schemas/request/$defs/AgentNudgeTargetIdentity"
+            },
+            "nudge_id": {
+              "type": "string"
+            },
+            "target": {
+              "type": "string"
+            },
+            "text": {
+              "type": "string"
+            },
+            "timeout_ms": {
+              "format": "uint32",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          "required": [
+            "target",
+            "expected_instance",
+            "nudge_id",
+            "text",
+            "timeout_ms"
+          ],
+          "type": "object"
+        },
+        "AgentNudgeTargetIdentity": {
+          "description": "Stable identity snapshot supplied by the caller, checked again before any delivery attempt.",
+          "properties": {
+            "pane_id": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state_change_seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id",
+            "workspace_id",
+            "tab_id",
+            "pane_id",
+            "revision",
+            "state_change_seq"
+          ],
+          "type": "object"
+        },
         "AgentPromptParams": {
           "properties": {
             "target": {
@@ -5420,6 +5486,22 @@
         {
           "properties": {
             "method": {
+              "const": "agent.nudge",
+              "type": "string"
+            },
+            "params": {
+              "$ref": "#/schemas/request/$defs/AgentNudgeParams"
+            }
+          },
+          "required": [
+            "method",
+            "params"
+          ],
+          "type": "object"
+        },
+        {
+          "properties": {
+            "method": {
               "const": "agent.wait",
               "type": "string"
             },
@@ -6733,6 +6815,68 @@
             "source",
             "source_kind",
             "local_override_shadowing_remote"
+          ],
+          "type": "object"
+        },
+        "AgentNudgeOutcome": {
+          "enum": [
+            "delivered",
+            "rejected_before_delivery",
+            "unknown"
+          ],
+          "type": "string"
+        },
+        "AgentNudgeTargetInstance": {
+          "description": "Snapshot evidence for a nudge target; this is not an authenticated instance token.",
+          "properties": {
+            "agent": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "interactive_ready": {
+              "type": "boolean"
+            },
+            "launch_pending": {
+              "type": "boolean"
+            },
+            "pane_id": {
+              "type": "string"
+            },
+            "revision": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "state_change_seq": {
+              "format": "uint64",
+              "minimum": 0,
+              "type": "integer"
+            },
+            "status": {
+              "$ref": "#/schemas/success_response/$defs/AgentStatus"
+            },
+            "tab_id": {
+              "type": "string"
+            },
+            "terminal_id": {
+              "type": "string"
+            },
+            "workspace_id": {
+              "type": "string"
+            }
+          },
+          "required": [
+            "terminal_id",
+            "workspace_id",
+            "tab_id",
+            "pane_id",
+            "status",
+            "state_change_seq",
+            "revision",
+            "launch_pending",
+            "interactive_ready"
           ],
           "type": "object"
         },
@@ -9489,6 +9633,40 @@
               "required": [
                 "type",
                 "agent"
+              ],
+              "type": "object"
+            },
+            {
+              "properties": {
+                "code": {
+                  "type": "string"
+                },
+                "nudge_id": {
+                  "type": "string"
+                },
+                "outcome": {
+                  "$ref": "#/schemas/success_response/$defs/AgentNudgeOutcome"
+                },
+                "target_instance": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/schemas/success_response/$defs/AgentNudgeTargetInstance"
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                },
+                "type": {
+                  "const": "agent_nudged",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "type",
+                "nudge_id",
+                "outcome",
+                "code"
               ],
               "type": "object"
             },

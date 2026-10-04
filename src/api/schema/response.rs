@@ -104,6 +104,13 @@ pub enum ResponseResult {
     AgentPrompted {
         agent: AgentInfo,
     },
+    AgentNudged {
+        nudge_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        target_instance: Option<super::agents::AgentNudgeTargetInstance>,
+        outcome: super::agents::AgentNudgeOutcome,
+        code: String,
+    },
     AgentList {
         agents: Vec<AgentInfo>,
     },

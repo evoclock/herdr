@@ -183,6 +183,67 @@ pub struct AgentPromptParams {
     pub wait: Option<AgentPromptWaitOptions>,
 }
 
+/// Stable identity snapshot supplied by the caller, checked again before any delivery attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentNudgeTargetIdentity {
+    pub terminal_id: String,
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub pane_id: String,
+    pub revision: u64,
+    pub state_change_seq: u64,
+}
+
+/// One bounded recovery message request. The caller creates a canonical UUIDv4
+/// unique across its journeys for this logical request and must not reuse it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentNudgeParams {
+    pub target: String,
+    pub expected_instance: AgentNudgeTargetIdentity,
+    pub nudge_id: String,
+    pub text: String,
+    pub timeout_ms: u32,
+}
+
+pub fn is_canonical_nudge_id(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 36
+        && [8, 13, 18, 23].iter().all(|index| bytes[*index] == b'-')
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            if [8, 13, 18, 23].contains(&index) {
+                true
+            } else {
+                byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase()
+            }
+        })
+        && bytes[14] == b'4'
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentNudgeOutcome {
+    Delivered,
+    RejectedBeforeDelivery,
+    Unknown,
+}
+
+/// Snapshot evidence for a nudge target; this is not an authenticated instance token.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentNudgeTargetInstance {
+    pub terminal_id: String,
+    pub workspace_id: String,
+    pub tab_id: String,
+    pub pane_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    pub status: AgentStatus,
+    pub state_change_seq: u64,
+    pub revision: u64,
+    pub launch_pending: bool,
+    pub interactive_ready: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AgentInfo {
     pub terminal_id: String,
