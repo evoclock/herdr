@@ -200,9 +200,22 @@ pub struct AgentNudgeTargetIdentity {
 pub struct AgentNudgeParams {
     pub target: String,
     pub expected_instance: AgentNudgeTargetIdentity,
+    /// Experimental extension-owned identity; never inferred from a pane title.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_pi: Option<AgentNudgePiIdentity>,
     pub nudge_id: String,
     pub text: String,
     pub timeout_ms: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AgentNudgePiIdentity {
+    pub pid: u32,
+    pub session_id: String,
+    pub boot_nonce: String,
+    /// One extension-owned, detached-confirm ticket, not general modal support.
+    #[serde(default)]
+    pub modal_ticket: String,
 }
 
 pub fn is_canonical_nudge_id(value: &str) -> bool {

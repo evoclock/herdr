@@ -139,6 +139,8 @@ pub enum Method {
     AgentPrompt(AgentPromptParams),
     #[serde(rename = "agent.nudge")]
     AgentNudge(AgentNudgeParams),
+    #[serde(rename = "agent.nudge_proof")]
+    AgentNudgeProof(AgentNudgeParams),
     #[serde(rename = "agent.wait")]
     AgentWait(AgentWaitParams),
     #[serde(rename = "pane.split")]

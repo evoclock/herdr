@@ -22,7 +22,8 @@ pub(super) fn run_agent_command(args: &[String]) -> std::io::Result<i32> {
         "read" => agent_read(&args[1..]),
         "send-keys" => agent_send_keys(&args[1..]),
         "prompt" => agent_prompt(&args[1..]),
-        "nudge" => agent_nudge(&args[1..]),
+        "nudge" => agent_nudge(&args[1..], false),
+        "nudge-proof" => agent_nudge(&args[1..], true),
         "rename" => agent_rename(&args[1..]),
         "focus" => agent_focus(&args[1..]),
         "wait" => agent_wait(&args[1..]),
@@ -852,7 +853,7 @@ fn agent_prompt(args: &[String]) -> std::io::Result<i32> {
     super::print_response(&response)
 }
 
-fn agent_nudge(args: &[String]) -> std::io::Result<i32> {
+fn agent_nudge(args: &[String], proof: bool) -> std::io::Result<i32> {
     let Some(target) = args.first() else {
         eprintln!("usage: herdr agent nudge <target> <text> --nudge-id UUID --terminal-id ID --workspace-id ID --tab-id ID --pane-id ID --revision N --state-change-seq N [--timeout MS]");
         return Ok(2);
@@ -862,6 +863,10 @@ fn agent_nudge(args: &[String]) -> std::io::Result<i32> {
         return Ok(2);
     };
     let mut nudge_id = None;
+    let mut pi_pid = None;
+    let mut pi_session_id = None;
+    let mut pi_boot_nonce = None;
+    let mut pi_modal_ticket = None;
     let mut terminal_id = None;
     let mut workspace_id = None;
     let mut tab_id = None;
@@ -881,7 +886,8 @@ fn agent_nudge(args: &[String]) -> std::io::Result<i32> {
                 index += 2;
             }
             "--terminal-id" | "--workspace-id" | "--tab-id" | "--pane-id" | "--revision"
-            | "--state-change-seq" => {
+            | "--state-change-seq" | "--pi-pid" | "--pi-session-id" | "--pi-boot-nonce"
+            | "--pi-modal-ticket" => {
                 let option = args[index].as_str();
                 let Some(value) = args.get(index + 1) else {
                     eprintln!("{option} requires a value");
@@ -894,10 +900,15 @@ fn agent_nudge(args: &[String]) -> std::io::Result<i32> {
                     "--pane-id" => pane_id = Some(value.clone()),
                     "--revision" => revision = value.parse::<u64>().ok(),
                     "--state-change-seq" => state_change_seq = value.parse::<u64>().ok(),
+                    "--pi-pid" => pi_pid = value.parse::<u32>().ok().filter(|pid| *pid > 0),
+                    "--pi-session-id" => pi_session_id = Some(value.clone()),
+                    "--pi-boot-nonce" => pi_boot_nonce = Some(value.clone()),
+                    "--pi-modal-ticket" => pi_modal_ticket = Some(value.clone()),
                     _ => unreachable!(),
                 }
-                if matches!(option, "--revision" | "--state-change-seq")
-                    && (value.is_empty() || value.parse::<u64>().is_err())
+                if (matches!(option, "--revision" | "--state-change-seq")
+                    && (value.is_empty() || value.parse::<u64>().is_err()))
+                    || (option == "--pi-pid" && pi_pid.is_none())
                 {
                     eprintln!("{option} must be an unsigned integer");
                     return Ok(2);
@@ -924,6 +935,27 @@ fn agent_nudge(args: &[String]) -> std::io::Result<i32> {
                 return Ok(2);
             }
         }
+    }
+    if [
+        pi_pid.is_some(),
+        pi_session_id.is_some(),
+        pi_boot_nonce.is_some(),
+    ]
+    .into_iter()
+    .any(|provided| provided)
+        && (pi_pid.is_none() || pi_session_id.is_none() || pi_boot_nonce.is_none())
+    {
+        eprintln!("--pi-pid, --pi-session-id and --pi-boot-nonce must be supplied together");
+        return Ok(2);
+    }
+    if proof
+        && (pi_pid.is_none()
+            || pi_session_id.is_none()
+            || pi_boot_nonce.is_none()
+            || pi_modal_ticket.is_none())
+    {
+        eprintln!("private proof requires pinned Pi identity AND --pi-modal-ticket");
+        return Ok(2);
     }
     let Some(nudge_id) = nudge_id else {
         eprintln!("--nudge-id is required; use a fresh canonical UUIDv4 for each logical request");
@@ -971,7 +1003,11 @@ fn agent_nudge(args: &[String]) -> std::io::Result<i32> {
 
     let response = super::send_request(&Request {
         id: "cli:agent:nudge".into(),
-        method: Method::AgentNudge(AgentNudgeParams {
+        method: (if proof {
+            Method::AgentNudgeProof
+        } else {
+            Method::AgentNudge
+        })(AgentNudgeParams {
             target: target.clone(),
             expected_instance: AgentNudgeTargetIdentity {
                 terminal_id,
@@ -980,6 +1016,17 @@ fn agent_nudge(args: &[String]) -> std::io::Result<i32> {
                 pane_id,
                 revision,
                 state_change_seq,
+            },
+            expected_pi: match (pi_pid, pi_session_id, pi_boot_nonce) {
+                (Some(pid), Some(session_id), Some(boot_nonce)) => {
+                    Some(crate::api::schema::AgentNudgePiIdentity {
+                        pid,
+                        session_id,
+                        boot_nonce,
+                        modal_ticket: pi_modal_ticket.unwrap_or_default(),
+                    })
+                }
+                _ => None,
             },
             nudge_id,
             text: text.clone(),

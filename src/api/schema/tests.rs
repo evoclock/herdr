@@ -166,6 +166,7 @@ fn agent_nudge_request_and_refusal_response_round_trip() {
                 revision: 9,
                 state_change_seq: 4,
             },
+            expected_pi: None,
             nudge_id: "550e8400-e29b-41d4-a716-446655440000".into(),
             text: "Please report a checkpoint.".into(),
             timeout_ms: 5_000,
@@ -191,6 +192,20 @@ fn agent_nudge_request_and_refusal_response_round_trip() {
         serde_json::from_value::<SuccessResponse>(value).unwrap(),
         response
     );
+}
+
+#[test]
+fn nudge_proof_request_round_trip_requires_explicit_pi_and_modal_pins() {
+    let value = serde_json::json!({"id":"proof", "method":"agent.nudge_proof", "params":{
+        "target":"w1:p1", "expected_instance":{"terminal_id":"term-1","workspace_id":"w1","tab_id":"w1:t1","pane_id":"w1:p1","revision":1,"state_change_seq":2},
+        "expected_pi":{"pid":123,"session_id":"session-123","boot_nonce":"aaaaaaaaaaaaaaaaaaaaaaaa","modal_ticket":"ticket-123"},
+        "nudge_id":"12345678-1234-4123-8123-000000000778","text":"data only","timeout_ms":1000}});
+    let request: Request = serde_json::from_value(value.clone()).unwrap();
+    let Method::AgentNudgeProof(ref p) = request.method else {
+        panic!("wrong method");
+    };
+    assert_eq!(p.expected_pi.as_ref().unwrap().modal_ticket, "ticket-123");
+    assert_eq!(serde_json::to_value(request).unwrap(), value);
 }
 
 #[test]
