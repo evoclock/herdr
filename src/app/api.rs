@@ -5,6 +5,7 @@ mod agents;
 mod env;
 mod integrations;
 mod layouts;
+pub(crate) mod nudge_proof;
 mod panes;
 pub(crate) mod plugins;
 pub(super) mod responses;
@@ -29,6 +30,10 @@ enum RuntimeExitAction {
 impl App {
     pub(crate) fn handle_internal_event_with_render_impact(&mut self, ev: AppEvent) -> bool {
         match ev {
+            AppEvent::NudgeProofValidate { params, reply } => {
+                let _ = reply.send(self.proof_snapshot_matches(&params));
+                false
+            }
             AppEvent::GitStatusRefreshed {
                 results,
                 cache_updates,
@@ -1094,6 +1099,9 @@ impl App {
             }
             Method::AgentStart(params) => return self.handle_agent_start(request.id, params),
             Method::AgentNudge(params) => return self.handle_agent_nudge(request.id, params),
+            Method::AgentNudgeProof(params) => {
+                return self.handle_agent_nudge_proof(request.id, params)
+            }
             Method::AgentPrompt(_) => {
                 return responses::encode_error(
                     request.id,

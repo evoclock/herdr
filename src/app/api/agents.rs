@@ -14,6 +14,9 @@ use super::responses::{encode_error, encode_error_body, encode_success};
 const AGENT_PROMPT_SUBMIT_DELAY: Duration = Duration::from_millis(300);
 const MAX_AGENT_NUDGE_BYTES: usize = 2048;
 const MAX_AGENT_NUDGE_TIMEOUT_MS: u32 = 30_000;
+// Off by default. Never map the extension's internal accepted-durable receipt
+// to §3.1 delivered; the existing M1 refusal remains the external verdict.
+const PROTOTYPE_DELIVERY_ENABLED: bool = false;
 
 // Codex's Windows input reader does not surface bracketed paste. It detects the prompt as a
 // "paste burst" and, while that burst is buffered, rewrites a following Enter into a newline
@@ -128,6 +131,10 @@ impl App {
                         AgentStatus::Done => "target_done",
                         AgentStatus::Unknown => "target_status_unknown",
                         AgentStatus::Working | AgentStatus::Blocked => {
+                            // The adapter may observe an internal accepted-durable
+                            // stage for an isolated prototype, but contract-level
+                            // delivery is NOT approved: always report refusal.
+                            let _ = PROTOTYPE_DELIVERY_ENABLED;
                             "nudge_transport_unavailable"
                         }
                     }
@@ -179,11 +186,16 @@ impl App {
         request: crate::api::schema::Request,
         respond_to: std::sync::mpsc::Sender<String>,
     ) -> bool {
-        let crate::api::schema::Method::AgentPrompt(params) = request.method else {
-            return false;
+        let params = match request.method {
+            crate::api::schema::Method::AgentNudgeProof(params) => {
+                self.start_nudge_proof(request.id, params, respond_to);
+                return true;
+            }
+            crate::api::schema::Method::AgentPrompt(params) => params,
+            _ => return false,
         };
         match self.queue_agent_prompt(request.id, params) {
-            Ok((id, agent, completion)) => {
+            Ok((id, agent, completion, admission)) => {
                 std::thread::spawn(move || {
                     let response = match completion.recv() {
                         Ok(Ok(())) => encode_success(id, ResponseResult::AgentPrompted { agent }),
@@ -193,6 +205,7 @@ impl App {
                         Ok(Err(err)) => encode_error(id, "agent_prompt_failed", err.to_string()),
                         Err(_) => encode_error(id, "agent_prompt_failed", "pty actor closed"),
                     };
+                    drop(admission); // retain through queued text, submit delay AND Enter
                     let _ = respond_to.send(response);
                 });
             }
@@ -212,6 +225,7 @@ impl App {
             String,
             crate::api::schema::AgentInfo,
             std::sync::mpsc::Receiver<std::io::Result<()>>,
+            super::nudge_proof::Admission,
         ),
         String,
     > {
@@ -251,6 +265,18 @@ impl App {
         let Some(expected_agent) = terminal.effective_known_agent() else {
             return Err(agent_not_ready(id, &params.target));
         };
+        // Narrow opt-in combination: launch-supplied prompt only. Never send
+        // ordinary prompt text/Enter into an extension confirmation, including
+        // working/done screen misclassification or before the first proof call.
+        if self.nudge_proof.root.is_some() && expected_agent == crate::detect::Agent::Pi {
+            return Err(encode_error(id, "controlled_prompt_unsupported", "ordinary prompt is disabled for Pi on this private proof server; use an isolated launch prompt"));
+        }
+        let admission = self
+            .nudge_proof
+            .acquire(terminal_id.as_str())
+            .map_err(|code| {
+                encode_error(id.clone(), code, "pane has an in-flight prompt or proof")
+            })?;
         if terminal.managed_agent_launch_pending() {
             return Err(agent_not_ready(id, &params.target));
         }
@@ -307,7 +333,7 @@ impl App {
                 submit_deadline,
             )
             .map_err(|err| encode_error(id.clone(), "agent_prompt_failed", err.to_string()))?;
-        Ok((id, agent, completion))
+        Ok((id, agent, completion, admission))
     }
 
     pub(super) fn handle_agent_read(
@@ -553,10 +579,30 @@ mod tests {
                 revision: info.revision,
                 state_change_seq: info.state_change_seq,
             },
+            expected_pi: None,
             nudge_id,
             text: "Please report a checkpoint.".into(),
             timeout_ms: 5_000,
         }
+    }
+
+    #[test]
+    fn isolated_proof_endpoint_stays_disabled_without_explicit_opt_in() {
+        let mut app = app_with_agent();
+        let pane_id = app.state.workspaces[0].tabs[0].root_pane;
+        let terminal_id = app.state.workspaces[0].tabs[0].panes[&pane_id]
+            .attached_terminal_id
+            .clone();
+        let terminal = app.state.terminals.get_mut(&terminal_id).unwrap();
+        terminal.set_agent_name("reviewer".into());
+        terminal.set_detected_state(Some(Agent::Pi), AgentState::Blocked);
+        let params = nudge_params(&app, "reviewer");
+        let (tx, rx) = std::sync::mpsc::channel();
+        app.nudge_proof.root = None;
+        app.start_nudge_proof("proof".into(), params, tx);
+        let response = rx.recv().unwrap();
+        assert!(response.contains("prototype_disabled"));
+        assert!(response.contains("rejected_before_delivery"));
     }
 
     #[tokio::test]
@@ -860,6 +906,20 @@ mod tests {
             },
         );
         assert!(response_rx.try_recv().is_err());
+        assert!(
+            app.nudge_proof.acquire(terminal_id.as_str()).is_err(),
+            "proof must refuse while queued prompt includes delayed Enter"
+        );
+        let second = run_deferred_agent_prompt(
+            &mut app,
+            "concurrent",
+            AgentPromptParams {
+                target: "reviewer".into(),
+                text: "must not interleave".into(),
+                wait: None,
+            },
+        );
+        assert!(second.contains("pane_admission_busy"));
         let response = response_rx
             .recv_timeout(Duration::from_secs(1))
             .expect("agent prompt responds after submission");
